@@ -55,6 +55,10 @@ in `../CLAUDE.md`.
   `Closes #N` only on the commit that finishes it.
 - One branch per issue (`issue-N-short-slug`) off `main`; one PR per issue with `Closes #N`, tests
   and a CHANGELOG entry. Rebase, do not merge `main` into the branch.
+- When a PR or branch is merged, delete its source branch, locally and on the remote, so only
+  `main`, the `milestone-*` branches and deliberate `archive/*` refs remain. Remove a worktree
+  holding the branch first, and retarget any PR stacked on it to the merge target before deleting
+  it: GitHub closes a PR whose base branch disappears rather than moving it.
 - Published results are hosted: the signed store is mirrored to a Hugging Face dataset and pools
   are pushed to the hub (`store mirror`, `pools push`). What stays a plain file in the repository
   or a run directory is everything not published - run logs, side output, local records.
