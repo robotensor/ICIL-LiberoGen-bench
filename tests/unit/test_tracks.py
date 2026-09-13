@@ -160,7 +160,6 @@ def test_require_is_per_field_so_one_absence_does_not_stop_the_other():
     spec = _Spec()
     simulators.REGISTRY["presentsim"] = simulators.Simulator(
         name="presentsim",
-        make_policy=lambda *a, **k: None,
         run_units=lambda *a, **k: None,
         build_stage=lambda *a, **k: None,
         make_unit=lambda *a, **k: None,
