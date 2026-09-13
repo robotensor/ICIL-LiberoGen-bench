@@ -9,7 +9,7 @@ import pytest
 from icilval.admin import AdminServer
 from icilval.ids import ModelRef
 from icilval.live import LiveReporter, build_frame
-from icilval.queue import Queue
+from icilval.queue import Queue, Queues
 
 
 def test_queue_replace_moves_to_back_and_persists(tmp_path):
@@ -51,8 +51,10 @@ def test_admin_server_contract(spec, tmp_path):
             raise RuntimeError("no such repo")
         return (revision or "c") * 40 if len(revision or "c") == 1 else "d" * 40
 
-    q = Queue(tmp_path / "q.json")
-    server = AdminServer(spec, q, "secret", "k" * 64, bind="127.0.0.1", port=0, resolver=resolver)
+    queues = Queues(tmp_path / "queue", spec.tracks)
+    server = AdminServer(
+        spec, queues, "secret", "k" * 64, bind="127.0.0.1", port=0, resolver=resolver
+    )
     server.start_background()
     base = f"http://127.0.0.1:{server.port}"
     try:
@@ -61,7 +63,7 @@ def test_admin_server_contract(spec, tmp_path):
         assert (
             status == 200
             and body["ok"]
-            and body["queue_len"] == 0
+            and body["tracks"]["sensorimotor"]["queue_len"] == 0
             and body["validator_key"] == "k" * 64
         )
         assert _call(base + "/nope", "secret")[0] == 404
@@ -72,7 +74,7 @@ def test_admin_server_contract(spec, tmp_path):
             {
                 "repo": "org/model",
                 "revision": None,
-                "track": spec.track_id,
+                "track": "sensorimotor",
                 "duel_size": "smoke",
                 "skip_model_config_check": False,
                 "source": "dashboard-dev-mode",
@@ -86,6 +88,7 @@ def test_admin_server_contract(spec, tmp_path):
             and body["entry"] == "org/model@" + "c" * 40
         )
         assert set(body) >= {
+            "track",
             "key",
             "repo",
             "revision",
@@ -102,7 +105,7 @@ def test_admin_server_contract(spec, tmp_path):
                 base + "/admin/submissions",
                 "secret",
                 "POST",
-                {"repo": "org/model", "duel_size": "huge"},
+                {"repo": "org/model", "track": "sensorimotor", "duel_size": "huge"},
             )[0]
             == 422
         )
@@ -115,7 +118,17 @@ def test_admin_server_contract(spec, tmp_path):
             )[0]
             == 422
         )
-        status, body = _call(base + "/admin/submissions", "secret", "POST", {"repo": "bad/repo"})
+        # With more than one field, saying which is required: queueing against the wrong ladder
+        # is not something the organizer can see from the reply.
+        status, body = _call(base + "/admin/submissions", "secret", "POST", {"repo": "org/model"})
+        assert status == 422 and "track is required" in body["error"]
+        assert "sensorimotor" in body["error"] and "video_only" in body["error"]
+        status, body = _call(
+            base + "/admin/submissions",
+            "secret",
+            "POST",
+            {"repo": "bad/repo", "track": "sensorimotor"},
+        )
         assert status == 422 and "detail" in body
         req = urllib.request.Request(
             base + "/admin/submissions",
@@ -159,8 +172,8 @@ class _Sink(BaseHTTPRequestHandler):
 def test_live_frame_and_reporter(spec):
     units = [
         {
-            "unit_id": "pp-000",
-            "skill": "pick_and_place",
+            "unit_id": "mp-000",
+            "skill": "rt_sm_pick_and_place",
             "task": "t",
             "instance": 0,
             "king_success": True,
@@ -169,8 +182,8 @@ def test_live_frame_and_reporter(spec):
             "demo_video": "a" * 64,
         },
         {
-            "unit_id": "da-000",
-            "skill": "draw_anything",
+            "unit_id": "mu-000",
+            "skill": "rt_sm_press_push",
             "task": "t2",
             "instance": 1,
             "king_success": None,
@@ -180,6 +193,7 @@ def test_live_frame_and_reporter(spec):
     ]
     frame = build_frame(
         spec,
+        track="sensorimotor",
         validator_key="k",
         event_id="e" * 64,
         kind="duel",
@@ -189,7 +203,7 @@ def test_live_frame_and_reporter(spec):
         phase="evaluating",
         side="king",
         units=units,
-        current={"unit_id": "da-000", "skill": "draw_anything"},
+        current={"unit_id": "mu-000", "skill": "rt_sm_press_push"},
         recent_media=None,
         message="m" * 400,
         started_at="2026-01-01T00:00:00Z",
@@ -197,12 +211,12 @@ def test_live_frame_and_reporter(spec):
     assert (
         frame["done"] == 1
         and frame["total"] == 2
-        and frame["skill_progress"]["king"]["pick_and_place"] == {"done": 1, "total": 1}
+        and frame["skill_progress"]["king"]["rt_sm_pick_and_place"] == {"done": 1, "total": 1}
     )
-    assert frame["skill_progress"]["challenger"]["pick_and_place"]["done"] == 0
+    assert frame["skill_progress"]["challenger"]["rt_sm_pick_and_place"]["done"] == 0
     assert (
-        frame["units"][0]["skill"] == "pick_and_place"
-        and frame["units"][1]["skill"] == "draw_anything"
+        frame["units"][0]["skill"] == "rt_sm_pick_and_place"
+        and frame["units"][1]["skill"] == "rt_sm_press_push"
     )
     assert (
         len(frame["message"]) == 300
@@ -212,6 +226,7 @@ def test_live_frame_and_reporter(spec):
     with pytest.raises(ValueError):
         build_frame(
             spec,
+            track="sensorimotor",
             validator_key="k",
             event_id="e",
             kind="duel",

@@ -2,6 +2,198 @@
 
 ## Unreleased
 
+### Two fields on pluggable benchmarks
+
+- (feat): the `bpp_robotwin_v1` conversion and its policy. The network takes `agentview_rgb`,
+  `eye_in_hand_rgb`, `ee_pos`, `ee_ori` and `gripper_states` and emits a 10-dim delta; the
+  benchmark produces `frames_<camera>`, `qpos`, `endpose`, `gripper_joints` and `times`. The
+  conversion between them lives here, because this repository holds the weights and the
+  architecture template, and it stands alone on numpy - nothing under
+  `model/bpp_robotwin/` imports `robotwin_icil`, `icil_policies` or torch at module scope, so the
+  whole of it is checkable in the pure venv. The array-name contract is written down at the top of
+  `conversion.py`: observations carry the same names as the demonstration arrays, so one mapping
+  serves both, and it is the contract the benchmark's `prompt.py` has to keep matching. Two inputs
+  are refused rather than guessed, because both would be wrong silently - a demonstration with no
+  measured `gripper_joints` (the gripper inside `qpos` and `endpose` is a command, and reads
+  closed while the fingers rest on an object) and one with no `times` (the expert's frames are not
+  evenly spaced, so resampling on the frame index distorts a 20 Hz prompt by up to a fifth of a
+  second per motion primitive). Verified against the benchmark's own adapter on synthetic arrays:
+  every array - the resampling, the prompt actions, both views, all three proprioception keys, the
+  action decode and the executed row - agrees to 0.0 in float64 (#69).
+
+- (refactor): a policy comes from its **architecture**, not its simulator.
+  `simulators.make_policy` asked the skill's simulator, and `adapt()` answered "out of process"
+  for every benchmark in another repository - which is every benchmark this layer exists to run,
+  since the orchestrator holds the weights and serves the policy over a socket rather than handing
+  it over. `model/architectures.py` keys it by `spec.architecture(skill)`, which is what a policy
+  is built from anyway: the template instantiates it, the tensor manifest checks its weights, and
+  the observation names it consumes are the ones that template declares. `Simulator` no longer
+  carries a `make_policy` field (#69).
+- (feat): **spec v6 - the orchestrator ships no benchmark.** `simulators/libero/` and
+  `simulators/draw/` are gone, with their tests and the drawing pool generator; nothing is
+  imported for its `register()` side effect any more, and what this validator can score is exactly
+  what is plugged into it. Both fields therefore run on RoboTwin, the one benchmark that is
+  plugged, and because the fields must partition the skills the sensorimotor field gets three of
+  its own: `rt_sm_pick_and_place`, `rt_sm_stacking`, `rt_sm_press_push` on `bpp_robotwin_v1`.
+  Both thrones are empty: the v5 sensorimotor genesis was BPP on LIBERO and DrawAnything, which
+  are no longer scored here.
+- (fix): only a field whose prompts come from a pool needs one pinned. Demanding a `pools.tracks`
+  entry from a field that materializes its prompts meant pinning an id that names nothing.
+- **The sensorimotor field is degenerate at v6, and the contract says so.** RoboTwin V1 implements
+  only `same_scene`, so that field is now Same Scene *with* the action trajectory - and replaying
+  the demonstration's own actions into the identical scene solves the episode, which is what the
+  benchmark's replay oracle does to score 18/18. The field no longer closes the replay shortcut at
+  all. `tracks.sensorimotor._comment` says this, and the test that used to assert the two fields
+  closed it in opposite ways now asserts that only one of them does - so restoring a real
+  sensorimotor field is a visible change to that file rather than a silent one.
+
+- (feat): a duel for a field whose prompts are materialized no longer needs a pool. Unit
+  derivation goes to the plugin, the materialized prompt directory is what each side runs against,
+  the demonstration clip the benchmark already wrote beside its prompt is published as it is
+  rather than re-encoded, and the record carries no `pool_id` because there is no pool - the
+  prompts are published with the event instead (#69).
+
+- (feat): a field whose skills are on a plugged benchmark derives its units from the plugin.
+  `pools/units.py` knows what a LIBERO initial state and a drawing board's angle ranges are,
+  because those benchmarks ship here; only a benchmark knows what one of *its* units is. What the
+  orchestrator keeps is what belongs to the competition: a unit's identity (`<skill code>-<index>`,
+  the same shape every field uses, so a benchmark cannot collide with another's ids) and the seed
+  material it derives from (the duel id and the skill, never a clock or anything the benchmark
+  chooses), because both must be reproducible from the published record by someone holding neither
+  the pool nor the simulator (#69).
+
+- (feat): the orchestrator **serves** an entrant's policy, which is what `policy_address` in the
+  benchmark ABI has always pointed at and what nothing provided. The weights are a submission and
+  the network around them is a template this repository fingerprints, so handing them to a
+  benchmark would put the one thing the competition must control inside the thing it does not.
+  `model/wire.py` carries **named arrays and nothing else** - deliberately not RoboTwin's own
+  transport, good as it is, because that one carries its `Demonstration`, `Frame` and
+  `Observation` types and an orchestrator that spoke it would know one benchmark's types. Never
+  pickles. `model/host.py` serves it; `model/client.py` is the reference client a benchmark
+  **vendors** rather than imports, and this repository's tests drive the real host through it over
+  a real socket, so the thing a benchmark copies is the thing known to work. A model error is one
+  unit's failure, counted, with the host left up - tearing it down would void every unit after it.
+  The subprocess runner stands one host up per **skill**, not per unit: the policy is loaded once
+  and stays loaded, which is the frozen-policy guarantee, and a host per unit would reload it
+  between units (#69).
+
+- (feat): a plugged benchmark can actually be **run**. `simulators.adapt` wired `run_units` to a
+  refusal and nothing in `src/` ever called the ABI's `run_command` or `read_result`, so the only
+  benchmarks that could execute a duel were the two shipped here - an orchestration layer that can
+  only run its own benchmarks is not one. `benchmarks/subprocess_runner.py` builds the argv, runs
+  it, and turns the result file back into the record a duel scores, importing nothing of the
+  benchmark's simulator. A unit that crashes, times out, cannot be started or writes something
+  unreadable is **void with the reason on it** rather than fatal, so one bad unit does not lose
+  the rest; `max_void_fraction` still decides whether too many invalidate the duel. A plugged
+  benchmark's demonstration clip also renders now, from whatever arrays its video channel names
+  (#69).
+- (fix): the demonstration view can redact a benchmark whose arrays are prefixed. `allowed_keys`
+  did exact set-membership, so RoboTwin's one-array-per-camera video channel matched nothing and a
+  video-only prompt over it would have carried **no frames at all** - the field's enforcement
+  mechanism silently handing over an empty observation. A channel entry ending in `*` is now a
+  prefix, and a benchmark's own always-kept arrays (RoboTwin's frame timestamps) are declared in a
+  `metadata` channel rather than hoped to be covered by a constant here. It stays an allow-list:
+  the prefix matches its declared string and nothing near it (#70).
+
+- (feat): `icilval.reference` publishes a measurement that is no field's score, to
+  `references/<id>.json` — signed like an index record, clips in the same content-addressed
+  `media/` tree, and in no index at all. Where a record lives is itself a claim:
+  `tracks/<field>/index-NNNN.jsonl` says the validator ran this under that field's contract for
+  its crown, and a benchmark run is none of those. It would also be machine-readably false, since
+  the orchestrator stamps `prompt.view` from the *field* — so a run handed the demonstration's
+  actions would publish under a field whose record says they were withheld. An exhibit carries
+  `ladder: false` and `track: null` as literals, must state what the policy was shown, and must
+  carry the sentence a reader sees first. `icilval reference` publishes one, ingesting its clips
+  into the same `media/` tree and rebuilding `references/index.json` - the listing a reader needs
+  to find one at all, since a directory cannot be listed over HTTP. The listing repeats no claim
+  that is not also in the signed document it points at, and names the benchmark rather than a
+  field, so a page can work out where an exhibit is worth offering without the exhibit naming a
+  contest (#67).
+- (fix): crowning is an allow-list. `Store.append` advanced the head to `new_king` whenever that
+  field was present, whatever the record's kind; only duels set it today, but a kind added later
+  that reused the record shape would have moved a field's crown silently (#67).
+- (feat): `icilval.benchmarks.api` is the contract a benchmark in another repository implements,
+  beside `spec.json` and `store-schema.json`. It is one-directional — a plugin must never import
+  `icilval` — so `Benchmark` is a `Protocol` and `validate_plugin` checks a duck. The surface
+  splits into a pure half that runs with no simulator, assets or GPU, and command builders that
+  return an argv, so the orchestrator never imports a simulator and the simulator side can run in
+  another image or on another host. `docs/benchmarks.md` (#38).
+- (feat): benchmarks are discovered from the `icilval.benchmarks` entry point group, so one in
+  another repository registers exactly as an in-repo one does. A distribution that registers
+  nothing, registers another name, or fails to import raises rather than being skipped.
+  `icilval benchmarks list|info|verify` and `spec validate --strict` are the validator host's
+  deploy check, while `validate_spec` still accepts an uninstalled benchmark so CI and the
+  dashboard can check the contract with no simulator. A duel, genesis or pool build refuses up
+  front, naming the distribution to install (#39).
+- (feat): **spec v5** — the competition has fields. `track` becomes `tracks`, a map; each field
+  carries its own demonstration modality, protocol, skills, pool, baseline and duelling
+  constants. `prompt_instance_disjoint` moves onto the field, because it describes how that field
+  closes the replay shortcut and a Same Scene field closes it the other way; a field claiming a
+  disjoint prompt while scoring the state it demonstrated is now a validation error. `benchmarks`
+  declares which distribution provides each simulator. Version 4 was published and rolled back,
+  so that number is retired; store and live schema are 4. The sensorimotor field is renamed from
+  `icil_1demo`, which rebuilds the store (#49). The submission layout and the three skill ids are
+  unchanged, so existing entrant repositories and the published genesis still fit (#41).
+- (feat): `Spec`'s duelling constants are track-keyed methods rather than properties, so a call
+  site that was not updated raises rather than silently scoring the wrong field's skills;
+  `units_per_duel` becomes `units_per_side` and counts the field's own skills (#41).
+- (feat): the store, queues, daemon, intake and live frames are keyed by the field. The queue
+  becomes a directory with one file per field, because a field's block counter advances with its
+  own lineage; the daemon takes one entry from each field in turn under the store's single writer
+  lock, and skips a field whose benchmark is not installed rather than stopping or scoring it
+  empty. A submission names the field it enters, required once there is more than one.
+  `--track` on `queue`, `units derive`, `duel`, `run-side` and `smoke` (#42).
+- (feat): a field declares a **demonstration view**, and it is enforced rather than agreed. The
+  sensorimotor view shows frames, actions and proprioception; the video-only view shows the
+  frames alone. Redaction happens in the orchestrator, over its own arrays, so it works for every
+  benchmark and survives one changing underneath: a view names the channels it keeps and an array
+  claimed by no channel is dropped, so a benchmark that grows a new array cannot leak it into a
+  restricted view. A duel reads a demonstration through one chokepoint, which also hashes what it
+  handed over; store schema 4 publishes that digest and the view on every unit, and what the
+  field withheld on every event, so a third party can confirm it (#43).
+- (feat): a field says where its prompts come from. `pool` is published up front, as the
+  sensorimotor field has always done; `materialized` is produced per duel on the validator host
+  and published **with the event**, which is what a field must use when the demonstration is the
+  answer for the very scene it is scored on. Both sides still see identical bytes and a third
+  party still verifies by hash, just not before. A unit whose expert never succeeds is replaced
+  during materializing, so a generation failure cannot strike mid-duel (#44).
+- (feat): a field's withheld channels must be absent from its architecture, not merely from the
+  mapping its policies are handed. The Behavior Prompting templates already carry
+  `ignore_prompt_obs` / `ignore_prompt_proprio` / `ignore_prompt_action`, and the fingerprint
+  pins every template value outside `model.mutable_keys`, so a submission cannot flip one back
+  on. `spec validate --strict` checks it, along with a declared architecture that has no template
+  (#45).
+- (feat): **the video-only field**. Three skills over RoboTwin's V1 suite, namespaced because
+  RoboTwin's own task table also has a pick-and-place category. Same Scene: the demonstration
+  starts in the very scene the rollout is scored in, so replaying its actions would be perfect -
+  which is exactly why they are withheld, and why the two fields close the same shortcut in
+  opposite ways. Its prompts are materialized per duel, its sizes are small and its void
+  tolerance higher (a unit is a scene rebuild plus a rollout), and its skill encoder is
+  organizer-owned and frozen so two entrants are comparable. It opens with no king, and is
+  declared but not open: its benchmark is not installed and `uniskill_v1` has no template yet
+  (#61), both reported by `spec validate --strict` (#46).
+- (fix): a skill is held only to what its field asks of it. A field that withholds the action
+  trajectory has no prompt chunking to describe, and a skill naming a benchmark that is not
+  installed is no longer refused - `validate_spec` must pass on CI, on a laptop and against the
+  dashboard's vendored copy, none of which have a simulator (#46).
+
+### Pluggable simulators
+
+- (refactor): `icilval.simulators` is a registry of `Simulator` records (policy factory, unit
+  runner, pool stage, unit-instance builder, demo frames, spec checks), one package per
+  simulator under `simulators/`; the side runner, unit derivation, demo rendering, pool build
+  and spec validation look a skill's simulator up and never name one. `sim/` and the
+  per-simulator halves of `model/` and `pools/` moved under `simulators/libero/` and
+  `simulators/draw/`; unit lists and pool ids are unchanged (#6).
+- (fix): a simulator checks its own pool tasks. `verify_pool` walks a pool generically and
+  cannot read a simulator's file formats, so LIBERO's BDDL parse check had been dropped: a
+  present-but-unreadable BDDL passed the pool build and failed the duel. `Simulator.verify_pool_task`
+  (default no-op) is the seam, and LIBERO supplies the parse (#37).
+- (test): the boundary is checked, not just documented. A guard fails if a simulator name appears
+  in `src/icilval` outside `simulators/` — `robotwin`, `sapien` and `uniskill` are listed before
+  they exist so it cannot rot when the first out-of-repo benchmark lands — and no simulator
+  package may import a model stack at module scope (#37).
+
 ### Spec v3: BPP's unit protocol (pool schema 3, store schema 3, live schema 3)
 
 - published: pool `2026.09-v3` (`73a98b08…`, 2378 tasks, 23530 demonstrations) as
