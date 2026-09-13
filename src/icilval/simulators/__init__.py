@@ -19,6 +19,8 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
+from ..benchmarks.subprocess_runner import demo_frames_from, make_run_units
+
 log = logging.getLogger(__name__)
 
 #: Where a benchmark in another repository advertises itself. The entry point's name is the
@@ -149,17 +151,25 @@ def adapt(name: str, benchmark: Any, *, distribution: str) -> Simulator:
         return refuse
 
     info = benchmark.info() if hasattr(benchmark, "info") else {}
+    channels = {k: tuple(v) for k, v in (info.get("demo_channels") or {}).items()}
     return Simulator(
         name=name,
+        # A plugged benchmark's policy is *served*, not loaded here: the orchestrator owns the
+        # weights and the architecture template, the benchmark's subprocess connects to it.
         make_policy=out_of_process("loading a policy"),
-        run_units=out_of_process("running units"),
+        # This one is no longer a refusal. `run_command` plus `read_result` is a complete
+        # execution path, and leaving it refused was what kept this repository from being an
+        # orchestration layer at all.
+        run_units=make_run_units(name, benchmark),
+        # A pool is built offline from a benchmark's own sources; a plugged benchmark that needs
+        # one builds it on its own side. `prompts: "materialized"` fields need none.
         build_stage=out_of_process("building a pool"),
         make_unit=out_of_process("building a unit"),
-        demo_frames=lambda demo: [],
+        demo_frames=lambda demo: demo_frames_from(demo, channels),
         validate_skill=getattr(benchmark, "validate_skill", lambda skill, doc: []),
         distribution=distribution,
         benchmark=benchmark,
-        demo_channels={k: tuple(v) for k, v in (info.get("demo_channels") or {}).items()},
+        demo_channels=channels,
     )
 
 
@@ -272,6 +282,7 @@ def make_policy(model_dir: Any, arch_dir: Any, spec: Any, skill: str, device: st
     return for_skill(spec, skill).make_policy(model_dir, arch_dir, spec, skill, device=device)
 
 
-# The simulators this validator ships. Each import registers one.
-from . import draw as _draw  # noqa: E402, F401
-from . import libero as _libero  # noqa: E402, F401
+# No simulator is imported here. This validator ships no benchmark: what it can score is exactly
+# what is plugged into it through the `icilval.benchmarks` entry point group, and `load_plugins`
+# finds that. A benchmark living here again would be a benchmark the orchestrator cannot be run
+# without, which is the thing being undone.

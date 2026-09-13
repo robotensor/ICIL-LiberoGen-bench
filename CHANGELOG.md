@@ -4,6 +4,64 @@
 
 ### Two fields on pluggable benchmarks
 
+- (feat): **spec v6 - the orchestrator ships no benchmark.** `simulators/libero/` and
+  `simulators/draw/` are gone, with their tests and the drawing pool generator; nothing is
+  imported for its `register()` side effect any more, and what this validator can score is exactly
+  what is plugged into it. Both fields therefore run on RoboTwin, the one benchmark that is
+  plugged, and because the fields must partition the skills the sensorimotor field gets three of
+  its own: `rt_sm_pick_and_place`, `rt_sm_stacking`, `rt_sm_press_push` on `bpp_robotwin_v1`.
+  Both thrones are empty: the v5 sensorimotor genesis was BPP on LIBERO and DrawAnything, which
+  are no longer scored here.
+- (fix): only a field whose prompts come from a pool needs one pinned. Demanding a `pools.tracks`
+  entry from a field that materializes its prompts meant pinning an id that names nothing.
+- **The sensorimotor field is degenerate at v6, and the contract says so.** RoboTwin V1 implements
+  only `same_scene`, so that field is now Same Scene *with* the action trajectory - and replaying
+  the demonstration's own actions into the identical scene solves the episode, which is what the
+  benchmark's replay oracle does to score 18/18. The field no longer closes the replay shortcut at
+  all. `tracks.sensorimotor._comment` says this, and the test that used to assert the two fields
+  closed it in opposite ways now asserts that only one of them does - so restoring a real
+  sensorimotor field is a visible change to that file rather than a silent one.
+
+- (feat): a duel for a field whose prompts are materialized no longer needs a pool. Unit
+  derivation goes to the plugin, the materialized prompt directory is what each side runs against,
+  the demonstration clip the benchmark already wrote beside its prompt is published as it is
+  rather than re-encoded, and the record carries no `pool_id` because there is no pool - the
+  prompts are published with the event instead (#69).
+
+- (feat): a field whose skills are on a plugged benchmark derives its units from the plugin.
+  `pools/units.py` knows what a LIBERO initial state and a drawing board's angle ranges are,
+  because those benchmarks ship here; only a benchmark knows what one of *its* units is. What the
+  orchestrator keeps is what belongs to the competition: a unit's identity (`<skill code>-<index>`,
+  the same shape every field uses, so a benchmark cannot collide with another's ids) and the seed
+  material it derives from (the duel id and the skill, never a clock or anything the benchmark
+  chooses), because both must be reproducible from the published record by someone holding neither
+  the pool nor the simulator (#69).
+
+- (feat): the orchestrator **serves** an entrant's policy, which is what `policy_address` in the
+  benchmark ABI has always pointed at and what nothing provided. The weights are a submission and
+  the network around them is a template this repository fingerprints, so handing them to a
+  benchmark would put the one thing the competition must control inside the thing it does not.
+  `model/wire.py` carries **named arrays and nothing else** - deliberately not RoboTwin's own
+  transport, good as it is, because that one carries its `Demonstration`, `Frame` and
+  `Observation` types and an orchestrator that spoke it would know one benchmark's types. Never
+  pickles. `model/host.py` serves it; `model/client.py` is the reference client a benchmark
+  **vendors** rather than imports, and this repository's tests drive the real host through it over
+  a real socket, so the thing a benchmark copies is the thing known to work. A model error is one
+  unit's failure, counted, with the host left up - tearing it down would void every unit after it.
+  The subprocess runner stands one host up per **skill**, not per unit: the policy is loaded once
+  and stays loaded, which is the frozen-policy guarantee, and a host per unit would reload it
+  between units (#69).
+
+- (feat): a plugged benchmark can actually be **run**. `simulators.adapt` wired `run_units` to a
+  refusal and nothing in `src/` ever called the ABI's `run_command` or `read_result`, so the only
+  benchmarks that could execute a duel were the two shipped here - an orchestration layer that can
+  only run its own benchmarks is not one. `benchmarks/subprocess_runner.py` builds the argv, runs
+  it, and turns the result file back into the record a duel scores, importing nothing of the
+  benchmark's simulator. A unit that crashes, times out, cannot be started or writes something
+  unreadable is **void with the reason on it** rather than fatal, so one bad unit does not lose
+  the rest; `max_void_fraction` still decides whether too many invalidate the duel. A plugged
+  benchmark's demonstration clip also renders now, from whatever arrays its video channel names
+  (#69).
 - (fix): the demonstration view can redact a benchmark whose arrays are prefixed. `allowed_keys`
   did exact set-membership, so RoboTwin's one-array-per-camera video channel matched nothing and a
   video-only prompt over it would have carried **no frames at all** - the field's enforcement

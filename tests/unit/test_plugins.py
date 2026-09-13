@@ -79,7 +79,7 @@ def test_discovery_runs_once_and_is_not_repeated(entry_points):
     entry_points.append(_EntryPoint("countsim", "countpkg.plugin", once))
     simulators.names()
     simulators.names()
-    simulators.get("libero")
+    simulators.get("countsim")
     assert calls == [1]
 
 
@@ -101,8 +101,11 @@ class _Spec:
         return self._mapping[skill]
 
 
-def test_require_passes_when_every_benchmark_is_installed():
-    simulators.require(_Spec({"pick_and_place": "libero", "draw_anything": "draw"}))
+def test_require_passes_when_every_benchmark_is_installed(entry_points):
+    """No benchmark ships here, so one is registered for the test rather than assumed present."""
+    entry_points.append(_EntryPoint("fakesim", "fakepkg.plugin", lambda: _Plugin()))
+    simulators.load_plugins()
+    simulators.require(_Spec({"rt_stacking": "fakesim"}))
 
 
 def test_require_names_the_distribution_to_install():
@@ -125,14 +128,23 @@ def test_require_says_so_even_when_the_spec_declares_nothing():
         simulators.require(_Spec({"rt_stacking": "nosuchsim"}))
 
 
-def test_audit_reports_every_simulator_a_skill_names():
+def test_audit_reports_every_simulator_a_skill_names(entry_points):
+    entry_points.append(_EntryPoint("fakesim", "fakepkg.plugin", lambda: _Plugin()))
+    simulators.load_plugins()
     spec = _Spec(
-        {"pick_and_place": "libero", "rt_stacking": "nosuchsim"},
-        benchmarks={"nosuchsim": {"distribution": "some-benchmark-icil"}},
+        {"rt_sm_stacking": "fakesim", "rt_stacking": "nosuchsim"},
+        benchmarks={
+            "fakesim": {"distribution": "fake-benchmark-icil"},
+            "nosuchsim": {"distribution": "some-benchmark-icil"},
+        },
     )
     rows = {r["simulator"]: r for r in simulators.audit(spec)}
-    assert rows["libero"]["installed"] and not rows["libero"]["problems"]
-    assert rows["libero"]["skills"] == ["pick_and_place"]
+    assert rows["fakesim"]["installed"]
+    assert rows["fakesim"]["skills"] == ["rt_sm_stacking"]
+    # A registered plugin whose *distribution* cannot be found is still reported: the audit
+    # checks both, because a benchmark imported from somewhere unpinned is the thing the
+    # distribution pin exists to refuse.
+    assert rows["fakesim"]["problems"] == ["distribution fake-benchmark-icil not found"]
     assert not rows["nosuchsim"]["installed"]
     assert "not installed" in rows["nosuchsim"]["problems"]
     assert rows["nosuchsim"]["declared"]
@@ -234,12 +246,30 @@ def test_a_plugin_calling_itself_something_else_is_refused(entry_points):
         simulators.load_plugins()
 
 
-def test_the_in_process_hooks_refuse_rather_than_pretend(entry_points):
-    """An out-of-repo benchmark runs its simulator in a subprocess. A hook that quietly did
-    nothing would score a field on no episodes at all."""
+def test_the_hooks_that_cannot_work_in_this_process_refuse_rather_than_pretend(entry_points):
+    """A hook that quietly did nothing would score a field on no episodes at all.
+
+    `run_units` is deliberately not in this list: it is implemented for a plugged benchmark, by
+    driving `run_command` and `read_result` in a subprocess. The rest genuinely cannot happen
+    here - the orchestrator owns the weights and the architecture template, so a policy is
+    *served* rather than loaded into the benchmark's process, and a pool is built from a
+    benchmark's own sources on its own side.
+    """
     entry_points.append(_EntryPoint("fakesim", "fakepkg.plugin", lambda: _Plugin()))
     simulators.load_plugins()
     sim = simulators.get("fakesim")
-    for hook in (sim.make_policy, sim.run_units, sim.build_stage, sim.make_unit):
+    for hook in (sim.make_policy, sim.build_stage, sim.make_unit):
         with pytest.raises(MissingBenchmark, match="out of process"):
             hook()
+
+
+def test_a_plugged_benchmark_can_actually_run_units(entry_points):
+    """The capability this repository lacked: an orchestration layer that can only run the
+    benchmarks it ships is not one."""
+    entry_points.append(_EntryPoint("fakesim", "fakepkg.plugin", lambda: _Plugin()))
+    simulators.load_plugins()
+    sim = simulators.get("fakesim")
+    assert callable(sim.run_units)
+    # It is the subprocess runner, not a refusal.
+    with pytest.raises(TypeError):
+        sim.run_units()
